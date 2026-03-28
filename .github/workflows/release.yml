@@ -53,48 +53,69 @@ jobs:
           pip install nuitka
 
       # 步骤4：自动读取你上传的 1.txt 里的打包指令，根据平台执行对应命令
-      # 你只需要在 1.txt 里按 `平台: 命令` 的格式写，工作流会自动对应执行
+      # 你只需要在 1.txt 里按分组缩进的格式写，平台名开头，下面缩进写该平台的命令即可
       - name: Run platform-specific commands from 1.txt
         run: |
-          # 识别当前的运行平台，匹配你 1.txt 里的前缀
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            platform_prefix="linux:"
-            platform_name="Linux"
-          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            platform_prefix="mac:"
-            platform_name="Mac"
-          fi
+          # 使用 Python 解析你的 1.txt 文件，跨平台兼容，完美支持缩进分组的格式
+          python << 'EOF'
+          import os
+          import sys
 
-          # 从 1.txt 里提取命令，通用命令两个平台都执行，平台专属命令只执行对应平台的
-          while IFS= read -r line; do
-            # 跳过空行和注释行
-            if [ -n "$line" ] && [[ ! "$line" =~ ^# ]]; then
-              # 情况1：这行是当前平台的专属命令，只在当前平台执行
-              if [[ "$line" == "$platform_prefix"* ]]; then
-                # 去掉平台前缀，拿到真正的打包命令
-                cmd=${line#$platform_prefix}
-                cmd=${cmd# }
-                echo ">>> 正在执行${platform_name}平台专属命令: $cmd"
-                eval "$cmd"
-                if [ $? -ne 0 ]; then
-                  echo "!!! ${platform_name}平台命令执行失败: $cmd"
-                  exit 1
-                fi
-              # 情况2：这行是通用命令，不带平台前缀，Linux和Mac两个平台都会执行
-              elif [[ ! "$line" =~ ^(linux:|mac:) ]]; then
-                cmd=$line
-                echo ">>> 正在执行通用命令: $cmd"
-                eval "$cmd"
-                if [ $? -ne 0 ]; then
-                  echo "!!! 通用命令执行失败: $cmd"
-                  exit 1
-                fi
-              # 情况3：这行是其他平台的命令，直接跳过
-              else
-                echo ">>> 跳过其他平台的命令: $line"
-              fi
-            fi
-          done < 1.txt
+          # 识别当前的运行平台
+          runner_os = "${{ matrix.os }}"
+          if runner_os == "ubuntu-latest":
+              current_platform = "linux"
+          elif runner_os == "macos-latest":
+              current_platform = "mac"
+          elif runner_os == "windows-latest":
+              current_platform = "windows"
+
+          print(f">>> 当前运行平台: {current_platform}")
+
+          # 解析 1.txt 中的命令，区分通用命令和平台专属命令
+          common_commands = []
+          platform_commands = {"windows": [], "linux": [], "mac": []}
+          current_section = None
+
+          with open("1.txt", "r", encoding="utf-8") as f:
+              for line in f:
+                  line = line.rstrip("\n")
+                  stripped = line.strip()
+                  # 跳过空行和注释行
+                  if not stripped or stripped.startswith("#"):
+                      continue
+                  # 检查是不是平台节的开头（比如 windows:、linux:）
+                  if stripped in ["windows:", "linux:", "mac:"]:
+                      current_section = stripped[:-1]
+                      continue
+                  # 检查是不是缩进的行，属于当前平台的命令
+                  if line.startswith("    ") or line.startswith("\t"):
+                      if current_section:
+                          # 是当前平台的专属命令
+                          cmd = stripped
+                          platform_commands[current_section].append(cmd)
+                  else:
+                      # 是通用命令，所有平台都执行
+                      current_section = None
+                      common_commands.append(stripped)
+
+          # 整理当前平台需要执行的所有命令：先执行通用命令，再执行平台专属命令
+          commands = common_commands + platform_commands[current_platform]
+
+          if not commands:
+              print("!!! 没有找到可执行的命令，请检查你的 1.txt 文件格式")
+              sys.exit(1)
+
+          # 逐行执行命令
+          for cmd in commands:
+              print(f"\n>>> 正在执行命令: {cmd}")
+              ret = os.system(cmd)
+              if ret != 0:
+                  print(f"!!! 命令执行失败: {cmd}，错误码: {ret}")
+                  sys.exit(1)
+
+          print(f"\n>>> {current_platform}平台所有命令执行完成！")
+          EOF
 
           # 自动收集当前平台的打包产物到 dist 目录，方便后续上传到 Release
           mkdir -p dist
