@@ -1,0 +1,124 @@
+# 工作流名称：Python 包自动构建与发布到 GitHub Release
+name: Python Package Build & Release
+
+# 触发条件：
+# 1. 当推送以 `v` 开头的标签时自动触发（例如 v1.0.0、v2.1.3）
+# 2. 支持手动触发工作流
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 任务配置
+jobs:
+  build-and-release:
+    # 跨平台打包：同时运行 Windows、Linux、Mac 三个平台的打包任务
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: write  # 授予创建 Release 和上传文件的权限
+
+    steps:
+      # 步骤1：拉取你的仓库代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 步骤2：设置 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'  # 你可以根据项目需求修改 Python 版本
+          cache: 'pip'  # 缓存 pip 依赖，加快下次运行速度
+
+      # 步骤3：安装打包依赖（适配 Nuitka 打包工具，跨平台兼容）
+      - name: Install system dependencies for Nuitka
+        run: |
+          # 根据不同平台安装对应的系统依赖
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            # Linux 平台
+            sudo apt-get update
+            sudo apt-get install -y gcc python3-dev make
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            # Mac 平台
+            brew install make
+          # Windows 平台不需要额外安装系统依赖，GitHub Runner 已经预装了需要的编译工具
+          fi
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 安装你使用的 N 开头打包库（Nuitka），三个平台通用
+          pip install nuitka
+
+      # 步骤4：自动读取你上传的 1.txt 里的打包指令，根据平台执行对应命令
+      # 你只需要在 1.txt 里按 `平台: 命令` 的格式写，工作流会自动对应执行
+      - name: Run platform-specific commands from 1.txt
+        run: |
+          # 识别当前的运行平台，匹配你 1.txt 里的前缀
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            platform_prefix="linux:"
+            platform_name="Linux"
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            platform_prefix="mac:"
+            platform_name="Mac"
+          fi
+
+          # 从 1.txt 里提取命令，通用命令两个平台都执行，平台专属命令只执行对应平台的
+          while IFS= read -r line; do
+            # 跳过空行和注释行
+            if [ -n "$line" ] && [[ ! "$line" =~ ^# ]]; then
+              # 情况1：这行是当前平台的专属命令，只在当前平台执行
+              if [[ "$line" == "$platform_prefix"* ]]; then
+                # 去掉平台前缀，拿到真正的打包命令
+                cmd=${line#$platform_prefix}
+                cmd=${cmd# }
+                echo ">>> 正在执行${platform_name}平台专属命令: $cmd"
+                eval "$cmd"
+                if [ $? -ne 0 ]; then
+                  echo "!!! ${platform_name}平台命令执行失败: $cmd"
+                  exit 1
+                fi
+              # 情况2：这行是通用命令，不带平台前缀，Linux和Mac两个平台都会执行
+              elif [[ ! "$line" =~ ^(linux:|mac:) ]]; then
+                cmd=$line
+                echo ">>> 正在执行通用命令: $cmd"
+                eval "$cmd"
+                if [ $? -ne 0 ]; then
+                  echo "!!! 通用命令执行失败: $cmd"
+                  exit 1
+                fi
+              # 情况3：这行是其他平台的命令，直接跳过
+              else
+                echo ">>> 跳过其他平台的命令: $line"
+              fi
+            fi
+          done < 1.txt
+
+          # 自动收集当前平台的打包产物到 dist 目录，方便后续上传到 Release
+          mkdir -p dist
+          # 自动查找常见的可执行产物，移动到 dist 目录
+          mv *.exe ./dist/ 2>/dev/null || true
+          mv *.bin ./dist/ 2>/dev/null || true
+          mv *.AppImage ./dist/ 2>/dev/null || true
+          mv *.deb ./dist/ 2>/dev/null || true
+          mv *.rpm ./dist/ 2>/dev/null || true
+          mv *.app ./dist/ 2>/dev/null || true
+          # 自动查找子目录里的可执行文件，一并收集
+          find . -maxdepth 2 -type f -executable ! -path "./.git/*" ! -path "./.github/*" -exec mv {} ./dist/ \; 2>/dev/null || true
+
+      # 步骤5：自动创建 GitHub Release，并上传打包产物
+      - name: Create Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          # 上传 dist 目录下所有打包好的文件到 Release 中
+          files: |
+            ./dist/*
+          # 是否标记为草稿 Release（false 为直接发布）
+          draft: false
+          # 是否标记为预发布版本（false 为正式版本）
+          prerelease: false
+        env:
+          # GitHub 自动提供的访问令牌，无需手动配置
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
