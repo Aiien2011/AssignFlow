@@ -1,9 +1,7 @@
 # 工作流名称：Python 包自动构建与发布到 GitHub Release
 name: Python Package Build & Release
 
-# 触发条件：
-# 1. 当推送以 `v` 开头的标签时自动触发（例如 v1.0.0、v2.1.3）
-# 2. 支持手动触发工作流
+# 触发条件
 on:
   push:
     tags:
@@ -13,55 +11,55 @@ on:
 # 任务配置
 jobs:
   build-and-release:
-    # 跨平台打包：同时运行 Windows、Linux、Mac 三个平台的打包任务
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false # 单个平台失败不影响其他平台
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     permissions:
-      contents: write  # 授予创建 Release 和上传文件的权限
+      contents: write  #  Release 读写权限
 
     steps:
-      # 步骤1：拉取你的仓库代码
+      # 步骤1：拉取代码（修复分支/标签拉取失败问题）
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      # 步骤2：设置 Python 环境
-      - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905382afc9b # v4.2.2 稳定哈希版
         with:
-          python-version: '3.10'  # 你可以根据项目需求修改 Python 版本
-          cache: 'pip'  # 缓存 pip 依赖，加快下次运行速度
+          ref: ${{ github.ref }} # 强制拉取触发本次运行的标签/分支
+          fetch-depth: 0 # 拉取完整历史，避免标签识别失败
 
-      # 步骤3：安装打包依赖（适配 Nuitka 打包工具，跨平台兼容）
+      # 步骤2：设置 Python 环境（稳定版，避免拉取失败）
+      - name: Set up Python
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f29b0304e # v5.7.0 稳定哈希版
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      # 步骤3：安装系统依赖
       - name: Install system dependencies for Nuitka
         run: |
-          # 根据不同平台安装对应的系统依赖
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            # Linux 平台
             sudo apt-get update
             sudo apt-get install -y gcc python3-dev make
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            # Mac 平台
             brew install make
-          # Windows 平台不需要额外安装系统依赖，GitHub Runner 已经预装了需要的编译工具
           fi
+        shell: bash
+
+      # 步骤4：安装Python依赖（国内镜像，解决pip网络报错）
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # 安装你使用的 N 开头打包库（Nuitka），三个平台通用
-          pip install nuitka
+          pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install nuitka PyQt6 openpyxl xlrd python-docx openai
+        shell: bash
 
-      # 步骤4：自动读取你上传的 1.txt 里的打包指令，根据平台执行对应命令
-      # 你只需要在 1.txt 里按分组缩进的格式写，平台名开头，下面缩进写该平台的命令即可
+      # 步骤5：执行1.txt中的打包命令
       - name: Run platform-specific commands from 1.txt
         run: |
-          # 使用 Python 解析你的 1.txt 文件，跨平台兼容，完美支持缩进分组的格式
           python << 'EOF'
           import os
           import sys
 
-          # 识别当前的运行平台
           runner_os = "${{ matrix.os }}"
           if runner_os == "ubuntu-latest":
               current_platform = "linux"
@@ -72,7 +70,6 @@ jobs:
 
           print(f">>> 当前运行平台: {current_platform}")
 
-          # 解析 1.txt 中的命令，区分通用命令和平台专属命令
           common_commands = []
           platform_commands = {"windows": [], "linux": [], "mac": []}
           current_section = None
@@ -81,32 +78,24 @@ jobs:
               for line in f:
                   line = line.rstrip("\n")
                   stripped = line.strip()
-                  # 跳过空行和注释行
                   if not stripped or stripped.startswith("#"):
                       continue
-                  # 检查是不是平台节的开头（比如 windows:、linux:）
                   if stripped in ["windows:", "linux:", "mac:"]:
                       current_section = stripped[:-1]
                       continue
-                  # 检查是不是缩进的行，属于当前平台的命令
                   if line.startswith("    ") or line.startswith("\t"):
                       if current_section:
-                          # 是当前平台的专属命令
-                          cmd = stripped
-                          platform_commands[current_section].append(cmd)
+                          platform_commands[current_section].append(stripped)
                   else:
-                      # 是通用命令，所有平台都执行
                       current_section = None
                       common_commands.append(stripped)
 
-          # 整理当前平台需要执行的所有命令：先执行通用命令，再执行平台专属命令
           commands = common_commands + platform_commands[current_platform]
 
           if not commands:
-              print("!!! 没有找到可执行的命令，请检查你的 1.txt 文件格式")
+              print("!!! 没有找到可执行的命令，请检查1.txt格式")
               sys.exit(1)
 
-          # 逐行执行命令
           for cmd in commands:
               print(f"\n>>> 正在执行命令: {cmd}")
               ret = os.system(cmd)
@@ -116,30 +105,35 @@ jobs:
 
           print(f"\n>>> {current_platform}平台所有命令执行完成！")
           EOF
+        shell: bash
 
-          # 自动收集当前平台的打包产物到 dist 目录，方便后续上传到 Release
+      # 步骤6：收集打包产物（兼容Windows/Linux/Mac）
+      - name: Collect build artifacts
+        run: |
           mkdir -p dist
-          # 自动查找常见的可执行产物，移动到 dist 目录
-          mv *.exe ./dist/ 2>/dev/null || true
-          mv *.bin ./dist/ 2>/dev/null || true
-          mv *.AppImage ./dist/ 2>/dev/null || true
-          mv *.deb ./dist/ 2>/dev/null || true
-          mv *.rpm ./dist/ 2>/dev/null || true
-          mv *.app ./dist/ 2>/dev/null || true
-          # 自动查找子目录里的可执行文件，一并收集
-          find . -maxdepth 2 -type f -executable ! -path "./.git/*" ! -path "./.github/*" -exec mv {} ./dist/ \; 2>/dev/null || true
+          # Windows 产物收集
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            mv *.exe ./dist/ 2>/dev/null || true
+          # Linux 产物收集
+          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            mv *.bin ./dist/ 2>/dev/null || true
+            mv *.AppImage ./dist/ 2>/dev/null || true
+            mv *.deb ./dist/ 2>/dev/null || true
+            find . -maxdepth 2 -type f -executable ! -path "./.git/*" ! -path "./.github/*" -exec mv {} ./dist/ \; 2>/dev/null || true
+          # Mac 产物收集
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            mv *.app ./dist/ 2>/dev/null || true
+            find . -maxdepth 2 -type f -perm +111 ! -path "./.git/*" ! -path "./.github/*" -exec mv {} ./dist/ \; 2>/dev/null || true
+          fi
+        shell: bash
 
-      # 步骤5：自动创建 GitHub Release，并上传打包产物
+      # 步骤7：发布到GitHub Release（稳定版，避免拉取失败）
       - name: Create Release and upload assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8 稳定哈希版
         with:
-          # 上传 dist 目录下所有打包好的文件到 Release 中
-          files: |
-            ./dist/*
-          # 是否标记为草稿 Release（false 为直接发布）
+          files: ./dist/*
           draft: false
-          # 是否标记为预发布版本（false 为正式版本）
           prerelease: false
+          fail_on_unmatched_files: false # 单个平台无产物不报错
         env:
-          # GitHub 自动提供的访问令牌，无需手动配置
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
