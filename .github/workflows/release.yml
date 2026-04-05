@@ -1,139 +1,298 @@
-# 工作流名称：Python 包自动构建与发布到 GitHub Release
-name: Python Package Build & Release
-
-# 触发条件
+# 通用云端指令运行平台 - 工作流配置
+name: 云端指令运行平台
+# 触发条件：支持手动触发，也支持标签触发
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-
 # 任务配置
 jobs:
-  build-and-release:
+  run-tasks:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false # 单个平台失败不影响其他平台
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     permissions:
-      contents: write  #  Release 读写权限
-
+      contents: write
     steps:
-      # 步骤1：拉取代码（修复分支/标签拉取失败问题）
+      # 步骤1：拉取代码
       - name: Checkout code
-        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905382afc9b # v4.2.2 稳定哈希版
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905382afc9b
         with:
-          ref: ${{ github.ref }} # 强制拉取触发本次运行的标签/分支
-          fetch-depth: 0 # 拉取完整历史，避免标签识别失败
-
-      # 步骤2：设置 Python 环境（稳定版，避免拉取失败）
+          fetch-depth: 0
+      # 步骤2：设置Python环境
       - name: Set up Python
-        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f29b0304e # v5.7.0 稳定哈希版
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f29b0304e
         with:
           python-version: '3.10'
           cache: 'pip'
-
-      # 步骤3：安装系统依赖
-      - name: Install system dependencies for Nuitka
+      # 步骤3：安装基础依赖
+      - name: Install base dependencies
+        run: |
+          python -m pip install --upgrade pip requests
+          pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          # 安装拓展指令需要的依赖
+          pip install requests tqdm
+        shell: bash
+      # 步骤4：安装系统基础工具
+      - name: Install system tools
         run: |
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             sudo apt-get update
-            sudo apt-get install -y gcc python3-dev make
+            sudo apt-get install -y upx unzip
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            brew install make
+            brew install upx unzip
+          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            choco install upx unzip -y
           fi
         shell: bash
-
-      # 步骤4：安装Python依赖（国内镜像，解决pip网络报错）
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install nuitka PyQt6 openpyxl xlrd python-docx openai
-        shell: bash
-
-      # 步骤5：执行1.txt中的打包命令
-      - name: Run platform-specific commands from 1.txt
+      # 步骤5：通用指令解析与运行（核心：云端指令运行引擎）
+      - name: Run your custom commands
         run: |
           python << 'EOF'
           import os
           import sys
+          import subprocess
+          import requests
+          import tqdm
+          import zipfile
+          import tarfile
 
+          # 初始化变量
+          vars = {}
+          # 内置平台变量
           runner_os = "${{ matrix.os }}"
           if runner_os == "ubuntu-latest":
-              current_platform = "linux"
+              vars["OS"] = "linux"
           elif runner_os == "macos-latest":
-              current_platform = "mac"
+              vars["OS"] = "mac"
           elif runner_os == "windows-latest":
-              current_platform = "windows"
+              vars["OS"] = "windows"
+          
+          print(f">>> 云端指令运行平台已启动，当前平台: {vars['OS']}")
 
-          print(f">>> 当前运行平台: {current_platform}")
+          # 变量替换函数
+          def replace_vars(s):
+              for k, v in vars.items():
+                  s = s.replace(f"${k}", str(v))
+              return s
 
+          # 下载文件函数
+          def download_file(url, path):
+              print(f">>> 正在下载: {url} -> {path}")
+              resp = requests.get(url, stream=True)
+              total = int(resp.headers.get('content-length', 0))
+              with open(path, 'wb') as f, tqdm.tqdm(
+                  desc=path,
+                  total=total,
+                  unit='B',
+                  unit_scale=True,
+                  unit_divisor=1024,
+              ) as bar:
+                  for data in resp.iter_content(chunk_size=1024):
+                      size = f.write(data)
+                      bar.update(size)
+
+          # 解压文件函数
+          def extract_file(file_path, target_path):
+              print(f">>> 正在解压: {file_path} -> {target_path}")
+              os.makedirs(target_path, exist_ok=True)
+              if file_path.endswith('.zip'):
+                  with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                      zip_ref.extractall(target_path)
+              elif file_path.endswith('.tar.gz') or file_path.endswith('.tgz'):
+                  with tarfile.open(file_path, 'r:gz') as tar_ref:
+                      tar_ref.extractall(target_path)
+              elif file_path.endswith('.tar.bz2'):
+                  with tarfile.open(file_path, 'r:bz2') as tar_ref:
+                      tar_ref.extractall(target_path)
+
+          # 读取并解析指令
           common_commands = []
-          platform_commands = {"windows": [], "linux": [], "mac": []}
-          current_section = None
+          current_if_condition = None
+          current_if_active = True
+          current_indent = 0
 
           with open("1.txt", "r", encoding="utf-8") as f:
-              for line in f:
-                  line = line.rstrip("\n")
-                  stripped = line.strip()
-                  if not stripped or stripped.startswith("#"):
-                      continue
-                  if stripped in ["windows:", "linux:", "mac:"]:
-                      current_section = stripped[:-1]
-                      continue
-                  if line.startswith("    ") or line.startswith("\t"):
-                      if current_section:
-                          platform_commands[current_section].append(stripped)
+              lines = f.readlines()
+          
+          i = 0
+          while i < len(lines):
+              line = lines[i].rstrip("\n")
+              stripped = line.strip()
+              i += 1
+              if not stripped or stripped.startswith("#"):
+                  continue
+              
+              # 处理缩进
+              indent = len(line) - len(line.lstrip())
+              line_content = stripped
+
+              # 变量定义
+              if line_content.upper().startswith("SET "):
+                  _, var_def = line_content.split(" ", 1)
+                  k, v = var_def.split("=", 1)
+                  k = k.strip()
+                  v = v.strip()
+                  v = replace_vars(v)
+                  vars[k] = v
+                  print(f">>> 定义变量: {k} = {v}")
+                  continue
+              
+              # IF判断
+              if line_content.upper().startswith("IF "):
+                  # 解析条件
+                  cond = line_content[3:].strip().rstrip(":")
+                  cond = replace_vars(cond)
+                  # 简单的条件解析，支持 == != > <
+                  try:
+                      if "==" in cond:
+                          a, b = cond.split("==", 1)
+                          a = a.strip()
+                          b = b.strip()
+                          current_if_active = (a == b)
+                      elif "!=" in cond:
+                          a, b = cond.split("!=", 1)
+                          a = a.strip()
+                          b = b.strip()
+                          current_if_active = (a != b)
+                      elif ">" in cond:
+                          a, b = cond.split(">", 1)
+                          a = float(a.strip())
+                          b = float(b.strip())
+                          current_if_active = (a > b)
+                      elif "<" in cond:
+                          a, b = cond.split("<", 1)
+                          a = float(a.strip())
+                          b = float(b.strip())
+                          current_if_active = (a < b)
+                      else:
+                          print(f"!!! 不支持的条件: {cond}")
+                          current_if_active = False
+                  except:
+                      print(f"!!! 条件解析失败: {cond}")
+                      current_if_active = False
+                  current_indent = indent
+                  print(f">>> 条件判断: {cond} -> {'满足' if current_if_active else '不满足'}")
+                  continue
+              
+              # ELSE IF
+              if line_content.upper().startswith("ELSE IF "):
+                  cond = line_content[8:].strip().rstrip(":")
+                  cond = replace_vars(cond)
+                  if not current_if_active:
+                      # 之前的条件不满足，才判断这个
+                      try:
+                          if "==" in cond:
+                              a, b = cond.split("==", 1)
+                              a = a.strip()
+                              b = b.strip()
+                              current_if_active = (a == b)
+                          elif "!=" in cond:
+                              a, b = cond.split("!=", 1)
+                              a = a.strip()
+                              b = b.strip()
+                              current_if_active = (a != b)
+                          elif ">" in cond:
+                              a, b = cond.split(">", 1)
+                              a = float(a.strip())
+                              b = float(b.strip())
+                              current_if_active = (a > b)
+                          elif "<" in cond:
+                              a, b = cond.split("<", 1)
+                              a = float(a.strip())
+                              b = float(b.strip())
+                              current_if_active = (a < b)
+                      except:
+                          current_if_active = False
                   else:
-                      current_section = None
-                      common_commands.append(stripped)
+                      # 之前的条件已经满足，这个跳过
+                      current_if_active = False
+                  current_indent = indent
+                  print(f">>> 分支判断: {cond} -> {'满足' if current_if_active else '不满足'}")
+                  continue
+              
+              # ELSE
+              if line_content.upper() == "ELSE:":
+                  current_if_active = not current_if_active
+                  current_indent = indent
+                  print(f">>> 进入ELSE分支: {'激活' if current_if_active else '未激活'}")
+                  continue
 
-          commands = common_commands + platform_commands[current_platform]
+              # 拓展指令：DOWNLOAD
+              if line_content.upper().startswith("DOWNLOAD "):
+                  if not current_if_active:
+                      continue
+                  _, rest = line_content.split(" ", 1)
+                  rest = replace_vars(rest)
+                  url, path = rest.split(" ", 1)
+                  url = url.strip()
+                  path = path.strip()
+                  download_file(url, path)
+                  continue
+              
+              # 拓展指令：EXTRACT
+              if line_content.upper().startswith("EXTRACT "):
+                  if not current_if_active:
+                      continue
+                  _, rest = line_content.split(" ", 1)
+                  rest = replace_vars(rest)
+                  file, path = rest.split(" ", 1)
+                  file = file.strip()
+                  path = path.strip()
+                  extract_file(file, path)
+                  continue
+              
+              # 拓展指令：WAIT
+              if line_content.upper().startswith("WAIT "):
+                  if not current_if_active:
+                      continue
+                  _, sec = line_content.split(" ", 1)
+                  sec = int(replace_vars(sec.strip()))
+                  print(f">>> 等待 {sec} 秒...")
+                  import time
+                  time.sleep(sec)
+                  continue
 
-          if not commands:
-              print("!!! 没有找到可执行的命令，请检查1.txt格式")
-              sys.exit(1)
-
-          for cmd in commands:
-              print(f"\n>>> 正在执行命令: {cmd}")
-              ret = os.system(cmd)
-              if ret != 0:
-                  print(f"!!! 命令执行失败: {cmd}，错误码: {ret}")
-                  sys.exit(1)
-
-          print(f"\n>>> {current_platform}平台所有命令执行完成！")
+              # 普通的shell命令
+              if current_if_active:
+                  cmd = replace_vars(line_content)
+                  print(f"\n>>> 正在执行命令: {cmd}")
+                  ret = os.system(cmd)
+                  if ret != 0:
+                      print(f"!!! 命令执行失败: {cmd}，错误码: {ret}")
+                      # 可选：是否失败就退出，这里保留你原来的逻辑
+                      # sys.exit(1)
+          
+          print(f"\n>>> 所有指令执行完成！")
           EOF
         shell: bash
-
-      # 步骤6：收集打包产物（兼容Windows/Linux/Mac）
-      - name: Collect build artifacts
+      # 步骤6：收集产物
+      - name: Collect artifacts
         run: |
           mkdir -p dist
-          # Windows 产物收集
+          # 收集所有可执行文件/产物
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             mv *.exe ./dist/ 2>/dev/null || true
-          # Linux 产物收集
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             mv *.bin ./dist/ 2>/dev/null || true
             mv *.AppImage ./dist/ 2>/dev/null || true
             mv *.deb ./dist/ 2>/dev/null || true
             find . -maxdepth 2 -type f -executable ! -path "./.git/*" ! -path "./.github/*" -exec mv {} ./dist/ \; 2>/dev/null || true
-          # Mac 产物收集
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             mv *.app ./dist/ 2>/dev/null || true
             find . -maxdepth 2 -type f -perm +111 ! -path "./.git/*" ! -path "./.github/*" -exec mv {} ./dist/ \; 2>/dev/null || true
           fi
         shell: bash
-
-      # 步骤7：发布到GitHub Release（稳定版，避免拉取失败）
-      - name: Create Release and upload assets
-        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8 稳定哈希版
+      # 步骤7：发布产物到Release
+      - name: Upload artifacts to Release
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191
         with:
           files: ./dist/*
           draft: false
           prerelease: false
-          fail_on_unmatched_files: false # 单个平台无产物不报错
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
