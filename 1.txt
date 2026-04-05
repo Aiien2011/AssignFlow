@@ -1,2 +1,2 @@
-pip install PyQt6 openpyxl xlrd python-docx openai requests pillow pyqt6-tools
+pip install PyQt6 openpyxl xlrd python-docx openai requests pillow pyqt6-tools nuitka
 python -m nuitka --onefile --windows-disable-console --windows-icon-from-ico=ico.ico --enable-plugin=upx --lto=yes --strip --no-pyi-files --remove-output --jobs=auto --nofollow-import-to=test,unittest,__pycache__ --prefer-source-code assignflow.py
