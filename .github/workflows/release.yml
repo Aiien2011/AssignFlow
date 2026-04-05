@@ -1,4 +1,4 @@
-# 通用云端指令运行平台 - 工作流配置
+# 符合原生语法的云端指令运行平台 - 工作流配置
 name: 云端指令运行平台
 # 触发条件：支持手动触发，也支持标签触发
 on:
@@ -31,10 +31,8 @@ jobs:
       # 步骤3：安装基础依赖
       - name: Install base dependencies
         run: |
-          python -m pip install --upgrade pip requests
+          python -m pip install --upgrade pip requests tqdm
           pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          # 安装拓展指令需要的依赖
-          pip install requests tqdm
         shell: bash
       # 步骤4：安装系统基础工具
       - name: Install system tools
@@ -48,8 +46,8 @@ jobs:
             choco install upx unzip -y
           fi
         shell: bash
-      # 步骤5：通用指令解析与运行（核心：云端指令运行引擎）
-      - name: Run your custom commands
+      # 步骤5：原生指令运行引擎（核心：直接执行你写的Python+系统命令脚本）
+      - name: Run your custom script
         run: |
           python << 'EOF'
           import os
@@ -60,27 +58,28 @@ jobs:
           import zipfile
           import tarfile
 
-          # 初始化变量
-          vars = {}
-          # 内置平台变量
+          # 内置全局变量：当前平台
           runner_os = "${{ matrix.os }}"
           if runner_os == "ubuntu-latest":
-              vars["OS"] = "linux"
+              OS = "linux"
           elif runner_os == "macos-latest":
-              vars["OS"] = "mac"
+              OS = "mac"
           elif runner_os == "windows-latest":
-              vars["OS"] = "windows"
+              OS = "windows"
           
-          print(f">>> 云端指令运行平台已启动，当前平台: {vars['OS']}")
+          print(f">>> 云端指令运行平台已启动，当前平台: {OS}")
 
-          # 变量替换函数
-          def replace_vars(s):
-              for k, v in vars.items():
-                  s = s.replace(f"${k}", str(v))
-              return s
+          # 内置全局函数：运行系统命令，支持CMD/PowerShell/Shell
+          def run(cmd):
+              print(f"\n>>> 正在执行命令: {cmd}")
+              ret = os.system(cmd)
+              if ret != 0:
+                  print(f"!!! 命令执行失败: {cmd}，错误码: {ret}")
+                  # 你可以选择是否失败就退出，这里默认不退出，你也可以自己加sys.exit(1)
+                  # raise Exception(f"命令执行失败: {cmd}")
 
-          # 下载文件函数
-          def download_file(url, path):
+          # 内置全局函数：下载文件
+          def download(url, path):
               print(f">>> 正在下载: {url} -> {path}")
               resp = requests.get(url, stream=True)
               total = int(resp.headers.get('content-length', 0))
@@ -95,8 +94,8 @@ jobs:
                       size = f.write(data)
                       bar.update(size)
 
-          # 解压文件函数
-          def extract_file(file_path, target_path):
+          # 内置全局函数：解压文件
+          def extract(file_path, target_path):
               print(f">>> 正在解压: {file_path} -> {target_path}")
               os.makedirs(target_path, exist_ok=True)
               if file_path.endswith('.zip'):
@@ -109,163 +108,14 @@ jobs:
                   with tarfile.open(file_path, 'r:bz2') as tar_ref:
                       tar_ref.extractall(target_path)
 
-          # 读取并解析指令
-          common_commands = []
-          current_if_condition = None
-          current_if_active = True
-          current_indent = 0
-
+          # 直接执行你写在1.txt里的Python脚本，所有内置的函数/变量都可以直接用
           with open("1.txt", "r", encoding="utf-8") as f:
-              lines = f.readlines()
+              script_content = f.read()
           
-          i = 0
-          while i < len(lines):
-              line = lines[i].rstrip("\n")
-              stripped = line.strip()
-              i += 1
-              if not stripped or stripped.startswith("#"):
-                  continue
-              
-              # 处理缩进
-              indent = len(line) - len(line.lstrip())
-              line_content = stripped
+          # 执行脚本，把内置的函数/变量注入到全局
+          global_vars = globals()
+          exec(script_content, global_vars)
 
-              # 变量定义
-              if line_content.upper().startswith("SET "):
-                  _, var_def = line_content.split(" ", 1)
-                  k, v = var_def.split("=", 1)
-                  k = k.strip()
-                  v = v.strip()
-                  v = replace_vars(v)
-                  vars[k] = v
-                  print(f">>> 定义变量: {k} = {v}")
-                  continue
-              
-              # IF判断
-              if line_content.upper().startswith("IF "):
-                  # 解析条件
-                  cond = line_content[3:].strip().rstrip(":")
-                  cond = replace_vars(cond)
-                  # 简单的条件解析，支持 == != > <
-                  try:
-                      if "==" in cond:
-                          a, b = cond.split("==", 1)
-                          a = a.strip()
-                          b = b.strip()
-                          current_if_active = (a == b)
-                      elif "!=" in cond:
-                          a, b = cond.split("!=", 1)
-                          a = a.strip()
-                          b = b.strip()
-                          current_if_active = (a != b)
-                      elif ">" in cond:
-                          a, b = cond.split(">", 1)
-                          a = float(a.strip())
-                          b = float(b.strip())
-                          current_if_active = (a > b)
-                      elif "<" in cond:
-                          a, b = cond.split("<", 1)
-                          a = float(a.strip())
-                          b = float(b.strip())
-                          current_if_active = (a < b)
-                      else:
-                          print(f"!!! 不支持的条件: {cond}")
-                          current_if_active = False
-                  except:
-                      print(f"!!! 条件解析失败: {cond}")
-                      current_if_active = False
-                  current_indent = indent
-                  print(f">>> 条件判断: {cond} -> {'满足' if current_if_active else '不满足'}")
-                  continue
-              
-              # ELSE IF
-              if line_content.upper().startswith("ELSE IF "):
-                  cond = line_content[8:].strip().rstrip(":")
-                  cond = replace_vars(cond)
-                  if not current_if_active:
-                      # 之前的条件不满足，才判断这个
-                      try:
-                          if "==" in cond:
-                              a, b = cond.split("==", 1)
-                              a = a.strip()
-                              b = b.strip()
-                              current_if_active = (a == b)
-                          elif "!=" in cond:
-                              a, b = cond.split("!=", 1)
-                              a = a.strip()
-                              b = b.strip()
-                              current_if_active = (a != b)
-                          elif ">" in cond:
-                              a, b = cond.split(">", 1)
-                              a = float(a.strip())
-                              b = float(b.strip())
-                              current_if_active = (a > b)
-                          elif "<" in cond:
-                              a, b = cond.split("<", 1)
-                              a = float(a.strip())
-                              b = float(b.strip())
-                              current_if_active = (a < b)
-                      except:
-                          current_if_active = False
-                  else:
-                      # 之前的条件已经满足，这个跳过
-                      current_if_active = False
-                  current_indent = indent
-                  print(f">>> 分支判断: {cond} -> {'满足' if current_if_active else '不满足'}")
-                  continue
-              
-              # ELSE
-              if line_content.upper() == "ELSE:":
-                  current_if_active = not current_if_active
-                  current_indent = indent
-                  print(f">>> 进入ELSE分支: {'激活' if current_if_active else '未激活'}")
-                  continue
-
-              # 拓展指令：DOWNLOAD
-              if line_content.upper().startswith("DOWNLOAD "):
-                  if not current_if_active:
-                      continue
-                  _, rest = line_content.split(" ", 1)
-                  rest = replace_vars(rest)
-                  url, path = rest.split(" ", 1)
-                  url = url.strip()
-                  path = path.strip()
-                  download_file(url, path)
-                  continue
-              
-              # 拓展指令：EXTRACT
-              if line_content.upper().startswith("EXTRACT "):
-                  if not current_if_active:
-                      continue
-                  _, rest = line_content.split(" ", 1)
-                  rest = replace_vars(rest)
-                  file, path = rest.split(" ", 1)
-                  file = file.strip()
-                  path = path.strip()
-                  extract_file(file, path)
-                  continue
-              
-              # 拓展指令：WAIT
-              if line_content.upper().startswith("WAIT "):
-                  if not current_if_active:
-                      continue
-                  _, sec = line_content.split(" ", 1)
-                  sec = int(replace_vars(sec.strip()))
-                  print(f">>> 等待 {sec} 秒...")
-                  import time
-                  time.sleep(sec)
-                  continue
-
-              # 普通的shell命令
-              if current_if_active:
-                  cmd = replace_vars(line_content)
-                  print(f"\n>>> 正在执行命令: {cmd}")
-                  ret = os.system(cmd)
-                  if ret != 0:
-                      print(f"!!! 命令执行失败: {cmd}，错误码: {ret}")
-                      # 可选：是否失败就退出，这里保留你原来的逻辑
-                      # sys.exit(1)
-          
           print(f"\n>>> 所有指令执行完成！")
           EOF
         shell: bash
