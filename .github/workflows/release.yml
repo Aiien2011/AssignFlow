@@ -26,8 +26,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f29b0304e
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: '3.11'
       # 步骤3：安装基础依赖
       - name: Install base dependencies
         run: |
